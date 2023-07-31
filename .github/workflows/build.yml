@@ -3,22 +3,53 @@ on:
   push:
     branches:
       - main
-      - master
 jobs:
-  checkout:
-    name: Checkout
-    runs-on: ubuntu-18.04
+  aqua:
+    name: Aqua scanner
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
-      - name: Login to DockerHub
-        uses: docker/login-action@v2
+      - name: Run Aqua scanner
+        uses: docker://aquasec/aqua-scanner
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          GITHUB_TOKEN: ${{ github.token }}
-      - name: Build and push
-        uses: docker/build-push-action@v3
-        with:
-          push: true
-          tags: "${{ secrets.DOCKERHUB_USERNAME }}/${{ secrets.DOCKERHUB_REPO }}:${{ github.sha }}"
+          args: trivy -d fs --scanners config,vuln,secret . --sast --reachability
+          # To customize which severities to scan for, add the following flag: --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          # To enable SAST scanning, add: --sast
+          # To enable npm/dotnet non-lock file scanning, add: --package-json / --dotnet-proj
+        env:
+          AQUA_KEY: ${{ secrets.AQUA_KEY }}
+          AQUA_SECRET: ${{ secrets.AQUA_SECRET }}
+          TRIVY_RUN_AS_PLUGIN: 'aqua'
+  build:
+    name: build image & push to ECR
+    runs-on: ubuntu-latest
+    needs: aqua
+    permissions:
+          id-token: write
+    env:
+          AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+          ECR_REGISTRY: 'dkr-local-registry'
+          ECR_REPOSITORY: 'dkr-local-repo'
+          IMAGE_TAG: ${{ github.sha }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Build image locally
+        run: |
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+      - name: Manifest Generation
+        run: |
+          curl -sLo install.sh download.codesec.aquasec.com/billy/install.sh
+          curl -sLo install.sh.checksum https://github.com/argonsecurity/releases/releases/latest/download/install.sh.checksum
+          if ! cat install.sh.checksum | shasum -a 256 ; then
+            echo "install.sh checksum failed"
+            exit 1
+          fi
+          sh install.sh
+          rm install.sh install.sh.checksum
+          billy generate \
+              --access-token "${{ secrets.GITHUB_TOKEN }}" \
+              --aqua-key "${{ secrets.AQUA_KEY }}" \
+              --aqua-secret "${{ secrets.AQUA_SECRET }}" \
+              --artifact-path "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
